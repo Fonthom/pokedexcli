@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"math/rand"
 
 	"github.com/Fonthom/pokedexcli/internal/pokecache"
 )
@@ -14,6 +15,7 @@ type config struct {
 	Next     *string
 	Previous *string
 	cache    *pokecache.Cache
+	pokedex  map[string]Pokemon
 }
 
 type locationAreaResponse struct {
@@ -38,6 +40,24 @@ type exploreResponse struct {
 			Name string `json:"name"`
 		} `json:"pokemon"`
 	} `json:"pokemon_encounters"`
+}
+
+type Pokemon struct {
+	Name           string `json:"name"`
+	BaseExperience int    `json:"base_experience"`
+	Height         int    `json:"height"`
+	Weight         int    `json:"weight"`
+	Stats          []struct {
+		BaseStat int `json:"base_stat"`
+		Stat     struct {
+			Name string `json:"name"`
+		} `json:"stat"`
+	} `json:"stats"`
+	Types []struct {
+		Type struct {
+			Name string `json:"name"`
+		} `json:"type"`
+	} `json:"types"`
 }
 
 func getCommands() map[string]cliCommand {
@@ -66,6 +86,16 @@ func getCommands() map[string]cliCommand {
     		name:        "explore",
     		description: "List all Pokemon in a location area",
     		callback:    commandExplore,
+		},
+		"catch": {
+			name:        "catch",
+    		description: "Try to catch a Pokemon",
+    		callback:    commandCatch,
+		},
+		"inspect": {
+			name:        "inspect",
+			description: "Inspect a caught Pokemon",
+			callback:    commandInspect,
 		},
 	}
 }
@@ -134,6 +164,7 @@ func fetchAndPrintLocations(cfg *config, url string) error {
 	}
 	return nil
 }
+
 func commandExplore(cfg *config, args ...string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: explore <location-area>")
@@ -166,6 +197,77 @@ func commandExplore(cfg *config, args ...string) error {
 	fmt.Println("Found Pokemon:")
 	for _, e := range exploreResp.PokemonEncounters {
 		fmt.Printf(" - %s\n", e.Pokemon.Name)
+	}
+	return nil
+}
+
+func commandCatch(cfg *config, args ...string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: catch <pokemon>")
+	}
+	name := args[0]
+	url := "https://pokeapi.co/api/v2/pokemon/" + name
+
+	fmt.Printf("Throwing a Pokeball at %s...\n", name)
+
+	var body []byte
+	if cached, ok := cfg.cache.Get(url); ok {
+		body = cached
+	} else {
+		res, err := http.Get(url)
+		if err != nil {
+			return fmt.Errorf("error fetching pokemon: %w", err)
+		}
+		defer res.Body.Close()
+		body, err = io.ReadAll(res.Body)
+		if err != nil {
+			return fmt.Errorf("error reading response: %w", err)
+		}
+		cfg.cache.Add(url, body)
+	}
+
+	var pokemon Pokemon
+	if err := json.Unmarshal(body, &pokemon); err != nil {
+		return fmt.Errorf("error unmarshalling response: %w", err)
+	}
+
+	// higher base experience = harder to catch
+	// e.g. base_experience 100 -> ~66% catch chance
+	//      base_experience 300 -> ~25% catch chance
+	threshold := pokemon.BaseExperience / 2
+	roll := rand.Intn(pokemon.BaseExperience)
+	if roll > threshold {
+		fmt.Printf("%s escaped!\n", name)
+		return nil
+	}
+
+	cfg.pokedex[name] = pokemon
+	fmt.Printf("%s was caught!\n", name)
+	return nil
+}
+
+func commandInspect(cfg *config, args ...string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: inspect <pokemon>")
+	}
+	name := args[0]
+
+	pokemon, ok := cfg.pokedex[name]
+	if !ok {
+		fmt.Println("you have not caught that pokemon")
+		return nil
+	}
+
+	fmt.Printf("Name: %s\n", pokemon.Name)
+	fmt.Printf("Height: %d\n", pokemon.Height)
+	fmt.Printf("Weight: %d\n", pokemon.Weight)
+	fmt.Println("Stats:")
+	for _, s := range pokemon.Stats {
+		fmt.Printf("  -%s: %d\n", s.Stat.Name, s.BaseStat)
+	}
+	fmt.Println("Types:")
+	for _, t := range pokemon.Types {
+		fmt.Printf("  - %s\n", t.Type.Name)
 	}
 	return nil
 }
