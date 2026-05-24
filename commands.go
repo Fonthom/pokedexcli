@@ -29,7 +29,15 @@ type locationAreaResponse struct {
 type cliCommand struct {
 	name        string
 	description string
-	callback    func(*config) error
+	callback    func(*config, ...string) error
+}
+
+type exploreResponse struct {
+	PokemonEncounters []struct {
+		Pokemon struct {
+			Name string `json:"name"`
+		} `json:"pokemon"`
+	} `json:"pokemon_encounters"`
 }
 
 func getCommands() map[string]cliCommand {
@@ -54,10 +62,15 @@ func getCommands() map[string]cliCommand {
 			description: "Display the previous 20 location areas",
 			callback:    commandMapb,
 		},
+		"explore": {
+    		name:        "explore",
+    		description: "List all Pokemon in a location area",
+    		callback:    commandExplore,
+		},
 	}
 }
 
-func commandHelp(cfg *config) error {
+func commandHelp(cfg *config, args ...string) error {
 	fmt.Println("Welcome to the Pokedex!")
 	fmt.Printf("Usage:\n\n")
 	for _, cmd := range getCommands() {
@@ -66,13 +79,13 @@ func commandHelp(cfg *config) error {
 	return nil
 }
 
-func commandExit(cfg *config) error {
+func commandExit(cfg *config, args ...string) error {
 	fmt.Println("Closing the Pokedex... Goodbye!")
 	os.Exit(0)
 	return nil
 }
 
-func commandMap(cfg *config) error {
+func commandMap(cfg *config, args ...string) error {
 	url := "https://pokeapi.co/api/v2/location-area?offset=0&limit=20"
 	if cfg.Next != nil {
 		url = *cfg.Next
@@ -80,7 +93,7 @@ func commandMap(cfg *config) error {
 	return fetchAndPrintLocations(cfg, url)
 }
 
-func commandMapb(cfg *config) error {
+func commandMapb(cfg *config, args ...string) error {
 	if cfg.Previous == nil {
 		fmt.Println("you're on the first page")
 		return nil
@@ -118,6 +131,41 @@ func fetchAndPrintLocations(cfg *config, url string) error {
 
 	for _, area := range locationResp.Results {
 		fmt.Println(area.Name)
+	}
+	return nil
+}
+func commandExplore(cfg *config, args ...string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: explore <location-area>")
+	}
+	area := args[0]
+	url := "https://pokeapi.co/api/v2/location-area/" + area
+
+	var body []byte
+	if cached, ok := cfg.cache.Get(url); ok {
+		body = cached
+	} else {
+		res, err := http.Get(url)
+		if err != nil {
+			return fmt.Errorf("error fetching area: %w", err)
+		}
+		defer res.Body.Close()
+		body, err = io.ReadAll(res.Body)
+		if err != nil {
+			return fmt.Errorf("error reading response: %w", err)
+		}
+		cfg.cache.Add(url, body)
+	}
+
+	var exploreResp exploreResponse
+	if err := json.Unmarshal(body, &exploreResp); err != nil {
+		return fmt.Errorf("error unmarshalling response: %w", err)
+	}
+
+	fmt.Printf("Exploring %s...\n", area)
+	fmt.Println("Found Pokemon:")
+	for _, e := range exploreResp.PokemonEncounters {
+		fmt.Printf(" - %s\n", e.Pokemon.Name)
 	}
 	return nil
 }

@@ -24,9 +24,9 @@ func main() {
 		}
 		commandName := words[0]
 		if cmd, ok := commands[commandName]; ok {
-			if err := cmd.callback(cfg); err != nil {
-				fmt.Println("Error:", err)
-			}
+    		if err := cmd.callback(cfg, words[1:]...); err != nil {
+        		fmt.Println("Error:", err)
+    		}
 		} else {
 			fmt.Println("Unknown command")
 		}
