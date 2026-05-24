@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"time"
 
 	"github.com/Fonthom/pokedexcli/internal/pokecache"
 )
@@ -60,7 +59,7 @@ func getCommands() map[string]cliCommand {
 
 func commandHelp(cfg *config) error {
 	fmt.Println("Welcome to the Pokedex!")
-	fmt.Println("Usage:\n")
+	fmt.Printf("Usage:\n\n")
 	for _, cmd := range getCommands() {
 		fmt.Printf("%s: %s\n", cmd.name, cmd.description)
 	}
