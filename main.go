@@ -6,13 +6,18 @@ import (
 	"os"
 	"time"
 
+	"github.com/Fonthom/pokedexcli/internal/party"
+	"github.com/Fonthom/pokedexcli/internal/pokeapi"
 	"github.com/Fonthom/pokedexcli/internal/pokecache"
 )
 
 func main() {
+	cache := pokecache.NewCache(5 * time.Second)
 	cfg := &config{
-    	cache:   pokecache.NewCache(5 * time.Second),
-    	pokedex: make(map[string]Pokemon),
+		cache:   cache,
+		client:  pokeapi.NewClient(cache),
+		pokedex: make(map[string]pokeapi.Pokemon),
+		party:   party.NewParty(),
 	}
 	commands := getCommands()
 	scanner := bufio.NewScanner(os.Stdin)
@@ -23,11 +28,10 @@ func main() {
 		if len(words) == 0 {
 			continue
 		}
-		commandName := words[0]
-		if cmd, ok := commands[commandName]; ok {
-    		if err := cmd.callback(cfg, words[1:]...); err != nil {
-        		fmt.Println("Error:", err)
-    		}
+		if cmd, ok := commands[words[0]]; ok {
+			if err := cmd.callback(cfg, words[1:]...); err != nil {
+				fmt.Println("Error:", err)
+			}
 		} else {
 			fmt.Println("Unknown command")
 		}

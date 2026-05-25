@@ -1,13 +1,14 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
 	"math/rand"
+	"os"
+	"time"
 
+	"github.com/Fonthom/pokedexcli/internal/battle"
+	"github.com/Fonthom/pokedexcli/internal/party"
+	"github.com/Fonthom/pokedexcli/internal/pokeapi"
 	"github.com/Fonthom/pokedexcli/internal/pokecache"
 )
 
@@ -15,17 +16,9 @@ type config struct {
 	Next     *string
 	Previous *string
 	cache    *pokecache.Cache
-	pokedex  map[string]Pokemon
-}
-
-type locationAreaResponse struct {
-	Count    int     `json:"count"`
-	Next     *string `json:"next"`
-	Previous *string `json:"previous"`
-	Results  []struct {
-		Name string `json:"name"`
-		URL  string `json:"url"`
-	} `json:"results"`
+	client   *pokeapi.Client
+	pokedex  map[string]pokeapi.Pokemon
+	party    *party.Party
 }
 
 type cliCommand struct {
@@ -34,74 +27,19 @@ type cliCommand struct {
 	callback    func(*config, ...string) error
 }
 
-type exploreResponse struct {
-	PokemonEncounters []struct {
-		Pokemon struct {
-			Name string `json:"name"`
-		} `json:"pokemon"`
-	} `json:"pokemon_encounters"`
-}
-
-type Pokemon struct {
-	Name           string `json:"name"`
-	BaseExperience int    `json:"base_experience"`
-	Height         int    `json:"height"`
-	Weight         int    `json:"weight"`
-	Stats          []struct {
-		BaseStat int `json:"base_stat"`
-		Stat     struct {
-			Name string `json:"name"`
-		} `json:"stat"`
-	} `json:"stats"`
-	Types []struct {
-		Type struct {
-			Name string `json:"name"`
-		} `json:"type"`
-	} `json:"types"`
-}
-
 func getCommands() map[string]cliCommand {
 	return map[string]cliCommand{
-		"help": {
-			name:        "help",
-			description: "Displays a help message",
-			callback:    commandHelp,
-		},
-		"exit": {
-			name:        "exit",
-			description: "Exit the Pokedex",
-			callback:    commandExit,
-		},
-		"map": {
-			name:        "map",
-			description: "Display the next 20 location areas",
-			callback:    commandMap,
-		},
-		"mapb": {
-			name:        "mapb",
-			description: "Display the previous 20 location areas",
-			callback:    commandMapb,
-		},
-		"explore": {
-    		name:        "explore",
-    		description: "List all Pokemon in a location area",
-    		callback:    commandExplore,
-		},
-		"catch": {
-			name:        "catch",
-    		description: "Try to catch a Pokemon",
-    		callback:    commandCatch,
-		},
-		"inspect": {
-			name:        "inspect",
-			description: "Inspect a caught Pokemon",
-			callback:    commandInspect,
-		},
-		"pokedex": {
-    		name:        "pokedex",
-    		description: "List all caught Pokemon",
-    		callback:    commandPokedex,
-		},
+		"help":    {name: "help", description: "Displays a help message", callback: commandHelp},
+		"exit":    {name: "exit", description: "Exit the Pokedex", callback: commandExit},
+		"map":     {name: "map", description: "Display the next 20 location areas", callback: commandMap},
+		"mapb":    {name: "mapb", description: "Display the previous 20 location areas", callback: commandMapb},
+		"explore": {name: "explore", description: "List all Pokemon in a location area", callback: commandExplore},
+		"catch":   {name: "catch", description: "Try to catch a Pokemon", callback: commandCatch},
+		"inspect": {name: "inspect", description: "Inspect a caught Pokemon", callback: commandInspect},
+		"pokedex": {name: "pokedex", description: "List all caught Pokemon", callback: commandPokedex},
+		"party":   {name: "party", description: "Show your party", callback: commandParty},
+		"battle":  {name: "battle", description: "Battle two party members: battle <a> <b>", callback: commandBattle},
+		"evolve":  {name: "evolve", description: "Evolve a caught Pokemon if ready", callback: commandEvolve},
 	}
 }
 
@@ -125,7 +63,16 @@ func commandMap(cfg *config, args ...string) error {
 	if cfg.Next != nil {
 		url = *cfg.Next
 	}
-	return fetchAndPrintLocations(cfg, url)
+	resp, err := cfg.client.GetLocationAreas(url)
+	if err != nil {
+		return err
+	}
+	cfg.Next = resp.Next
+	cfg.Previous = resp.Previous
+	for _, area := range resp.Results {
+		fmt.Println(area.Name)
+	}
+	return nil
 }
 
 func commandMapb(cfg *config, args ...string) error {
@@ -133,38 +80,13 @@ func commandMapb(cfg *config, args ...string) error {
 		fmt.Println("you're on the first page")
 		return nil
 	}
-	return fetchAndPrintLocations(cfg, *cfg.Previous)
-}
-
-func fetchAndPrintLocations(cfg *config, url string) error {
-	var body []byte
-
-	if cached, ok := cfg.cache.Get(url); ok {
-		fmt.Println("(cache hit)")
-		body = cached
-	} else {
-		res, err := http.Get(url)
-		if err != nil {
-			return fmt.Errorf("error fetching locations: %w", err)
-		}
-		defer res.Body.Close()
-
-		body, err = io.ReadAll(res.Body)
-		if err != nil {
-			return fmt.Errorf("error reading response: %w", err)
-		}
-		cfg.cache.Add(url, body)
+	resp, err := cfg.client.GetLocationAreas(*cfg.Previous)
+	if err != nil {
+		return err
 	}
-
-	var locationResp locationAreaResponse
-	if err := json.Unmarshal(body, &locationResp); err != nil {
-		return fmt.Errorf("error unmarshalling response: %w", err)
-	}
-
-	cfg.Next = locationResp.Next
-	cfg.Previous = locationResp.Previous
-
-	for _, area := range locationResp.Results {
+	cfg.Next = resp.Next
+	cfg.Previous = resp.Previous
+	for _, area := range resp.Results {
 		fmt.Println(area.Name)
 	}
 	return nil
@@ -174,33 +96,13 @@ func commandExplore(cfg *config, args ...string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: explore <location-area>")
 	}
-	area := args[0]
-	url := "https://pokeapi.co/api/v2/location-area/" + area
-
-	var body []byte
-	if cached, ok := cfg.cache.Get(url); ok {
-		body = cached
-	} else {
-		res, err := http.Get(url)
-		if err != nil {
-			return fmt.Errorf("error fetching area: %w", err)
-		}
-		defer res.Body.Close()
-		body, err = io.ReadAll(res.Body)
-		if err != nil {
-			return fmt.Errorf("error reading response: %w", err)
-		}
-		cfg.cache.Add(url, body)
+	resp, err := cfg.client.ExploreArea(args[0])
+	if err != nil {
+		return err
 	}
-
-	var exploreResp exploreResponse
-	if err := json.Unmarshal(body, &exploreResp); err != nil {
-		return fmt.Errorf("error unmarshalling response: %w", err)
-	}
-
-	fmt.Printf("Exploring %s...\n", area)
+	fmt.Printf("Exploring %s...\n", args[0])
 	fmt.Println("Found Pokemon:")
-	for _, e := range exploreResp.PokemonEncounters {
+	for _, e := range resp.PokemonEncounters {
 		fmt.Printf(" - %s\n", e.Pokemon.Name)
 	}
 	return nil
@@ -211,37 +113,15 @@ func commandCatch(cfg *config, args ...string) error {
 		return fmt.Errorf("usage: catch <pokemon>")
 	}
 	name := args[0]
-	url := "https://pokeapi.co/api/v2/pokemon/" + name
-
 	fmt.Printf("Throwing a Pokeball at %s...\n", name)
 
-	var body []byte
-	if cached, ok := cfg.cache.Get(url); ok {
-		body = cached
-	} else {
-		res, err := http.Get(url)
-		if err != nil {
-			return fmt.Errorf("error fetching pokemon: %w", err)
-		}
-		defer res.Body.Close()
-		body, err = io.ReadAll(res.Body)
-		if err != nil {
-			return fmt.Errorf("error reading response: %w", err)
-		}
-		cfg.cache.Add(url, body)
+	pokemon, err := cfg.client.GetPokemon(name)
+	if err != nil {
+		return err
 	}
 
-	var pokemon Pokemon
-	if err := json.Unmarshal(body, &pokemon); err != nil {
-		return fmt.Errorf("error unmarshalling response: %w", err)
-	}
-
-	// higher base experience = harder to catch
-	// e.g. base_experience 100 -> ~66% catch chance
-	//      base_experience 300 -> ~25% catch chance
 	threshold := pokemon.BaseExperience / 2
-	roll := rand.Intn(pokemon.BaseExperience)
-	if roll > threshold {
+	if rand.Intn(pokemon.BaseExperience) > threshold {
 		fmt.Printf("%s escaped!\n", name)
 		return nil
 	}
@@ -249,6 +129,12 @@ func commandCatch(cfg *config, args ...string) error {
 	cfg.pokedex[name] = pokemon
 	fmt.Printf("%s was caught!\n", name)
 	fmt.Println("You may now inspect it with the inspect command.")
+
+	if err := cfg.party.Add(pokemon); err != nil {
+		fmt.Printf("(Party full — %s added to Pokedex only)\n", name)
+	} else {
+		fmt.Printf("%s was added to your party!\n", name)
+	}
 	return nil
 }
 
@@ -256,17 +142,12 @@ func commandInspect(cfg *config, args ...string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: inspect <pokemon>")
 	}
-	name := args[0]
-
-	pokemon, ok := cfg.pokedex[name]
+	pokemon, ok := cfg.pokedex[args[0]]
 	if !ok {
 		fmt.Println("you have not caught that pokemon")
 		return nil
 	}
-
-	fmt.Printf("Name: %s\n", pokemon.Name)
-	fmt.Printf("Height: %d\n", pokemon.Height)
-	fmt.Printf("Weight: %d\n", pokemon.Weight)
+	fmt.Printf("Name: %s\nHeight: %d\nWeight: %d\n", pokemon.Name, pokemon.Height, pokemon.Weight)
 	fmt.Println("Stats:")
 	for _, s := range pokemon.Stats {
 		fmt.Printf("  -%s: %d\n", s.Stat.Name, s.BaseStat)
@@ -288,4 +169,97 @@ func commandPokedex(cfg *config, args ...string) error {
 		fmt.Printf(" - %s\n", name)
 	}
 	return nil
+}
+
+func commandParty(cfg *config, args ...string) error {
+	members := cfg.party.Members()
+	if len(members) == 0 {
+		fmt.Println("Your party is empty")
+		return nil
+	}
+	fmt.Println("Your Party:")
+	for _, m := range members {
+		fmt.Printf(" - %s (Lv.%d) HP:%d ATK:%d XP:%d\n",
+			m.Nickname, m.Level, m.HP(), m.Attack(), m.XP)
+	}
+	return nil
+}
+
+func commandBattle(cfg *config, args ...string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: battle <pokemon-a> <pokemon-b>")
+	}
+	a, okA := cfg.party.Get(args[0])
+	b, okB := cfg.party.Get(args[1])
+	if !okA {
+		return fmt.Errorf("%s not found in party", args[0])
+	}
+	if !okB {
+		return fmt.Errorf("%s not found in party", args[1])
+	}
+	battle.Simulate(a, b)
+	return nil
+}
+
+func commandEvolve(cfg *config, args ...string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: evolve <pokemon>")
+	}
+	name := args[0]
+	member, inParty := cfg.party.Get(name)
+	if !inParty {
+		fmt.Println("that pokemon is not in your party")
+		return nil
+	}
+
+	// require 2 minutes since caught before evolving
+	if time.Since(member.CaughtAt) < 2*time.Minute {
+		remaining := 2*time.Minute - time.Since(member.CaughtAt)
+		fmt.Printf("%s is not ready to evolve yet. Try again in %s\n", name, remaining.Round(time.Second))
+		return nil
+	}
+
+	species, err := cfg.client.GetSpecies(member.Pokemon.Species.Name)
+	if err != nil {
+		return err
+	}
+	chain, err := cfg.client.GetEvolutionChain(species.EvolutionChain.URL)
+	if err != nil {
+		return err
+	}
+
+	nextEvolution := findNextEvolution(chain.Chain, member.Pokemon.Name)
+	if nextEvolution == "" {
+		fmt.Printf("%s cannot evolve any further\n", name)
+		return nil
+	}
+
+	evolved, err := cfg.client.GetPokemon(nextEvolution)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("What?! %s is evolving!\n", member.Nickname)
+	fmt.Printf("%s evolved into %s!\n", member.Nickname, evolved.Name)
+
+	cfg.pokedex[evolved.Name] = evolved
+	member.Pokemon = evolved
+	member.Nickname = evolved.Name
+	member.CaughtAt = time.Now()
+	return nil
+}
+
+func findNextEvolution(link pokeapi.EvolutionLink, currentName string) string {
+	if link.Species.Name == currentName {
+		if len(link.EvolvesTo) > 0 {
+			return link.EvolvesTo[0].Species.Name
+		}
+		return ""
+	}
+	for _, next := range link.EvolvesTo {
+		if result := findNextEvolution(next, currentName); result != "" {
+			return result
+		}
+	}
+	return ""
 }
